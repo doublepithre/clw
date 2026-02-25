@@ -26,7 +26,7 @@ A SaaS platform that enables recruiters to search through 5-10 lakh (500K–1M) 
 | **State Management** | TanStack Query + Zustand | Server state caching + minimal client state |
 | **Backend** | Node.js + Express | Lightweight, high-throughput API server |
 | **Language** | TypeScript (full stack) | Type safety across the entire codebase |
-| **Database** | PostgreSQL (installed on VM) + pgvector | Relational data + vector similarity search, co-located for low latency |
+| **Database** | Cloud SQL for PostgreSQL 15 + pgvector | Managed PostgreSQL with automated backups, HA, and pgvector support |
 | **Object Storage** | Google Cloud Storage (GCS) | Raw resume file storage (PDF/DOCX) |
 | **Vector Embeddings** | Vertex AI Embeddings API (`text-embedding-005`) | 768-dim embeddings, GCP-native |
 | **LLM** | Vertex AI (Gemini 2.0 Flash) | Query understanding, match reasoning, data extraction |
@@ -56,7 +56,7 @@ A SaaS platform that enables recruiters to search through 5-10 lakh (500K–1M) 
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                    GCP COMPUTE ENGINE VM (API + Workers)                    │
-│                    (e.g., e2-standard-4: 4 vCPU, 16GB RAM)                 │
+│                    (e.g., e2-standard-2: 2 vCPU, 8GB RAM)                  │
 │                                                                             │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │  Node.js API Server (Express) — managed by PM2 / systemd            │  │
@@ -81,20 +81,22 @@ A SaaS platform that enables recruiters to search through 5-10 lakh (500K–1M) 
 │  │  └──────────────┘  └──────────────┘  └──────────────┘              │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │
-│  ┌───────────────┐  ┌────────────────┐  ┌────────────────┐               │
-│  │ PostgreSQL 15  │  │  Redis         │  │  Nginx         │               │
-│  │ + pgvector     │  │  (BullMQ +     │  │  (reverse      │               │
-│  │ (local)        │  │   sessions)    │  │   proxy + SSL) │               │
-│  └───────────────┘  └────────────────┘  └────────────────┘               │
+│  ┌────────────────┐  ┌────────────────┐                                   │
+│  │  Redis          │  │  Nginx         │                                   │
+│  │  (BullMQ +      │  │  (reverse      │                                   │
+│  │   rate-limit)   │  │   proxy + SSL) │                                   │
+│  └────────────────┘  └────────────────┘                                   │
 └────────────────────────────┬────────────────────────────────────────────────┘
                              │
-                    ┌────────┴────────┐
-                    ▼                 ▼
-          ┌────────────────┐  ┌──────────────────────────────────────┐
-          │  GCS Bucket    │  │  Vertex AI                           │
-          │  (Resume       │  │  - Embeddings API (text-embedding-005)│
-          │   Files)       │  │  - Gemini 2.0 Flash                  │
-          └────────────────┘  └──────────────────────────────────────┘
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+   ┌────────────────┐ ┌────────────┐ ┌──────────────────────────────────────┐
+   │  Cloud SQL      │ │  GCS       │ │  Vertex AI                           │
+   │  PostgreSQL 15  │ │  Bucket    │ │  - Embeddings API (text-embedding-005)│
+   │  + pgvector     │ │  (Resume   │ │  - Gemini 2.0 Flash                  │
+   │  Enterprise ed. │ │   Files)   │ │                                      │
+   │  2 vCPU / 8GB   │ │            │ │                                      │
+   └────────────────┘ └────────────┘ └──────────────────────────────────────┘
 ```
 
 ---
@@ -785,12 +787,13 @@ resumeai/
 │   ├── terraform/                     # GCP infrastructure
 │   │   ├── main.tf
 │   │   ├── compute.tf                 # Compute Engine VM definition
-│   │   ├── networking.tf              # VPC, firewall rules (allow 443, deny all else)
+│   │   ├── cloud-sql.tf              # Cloud SQL PostgreSQL + pgvector instance
+│   │   ├── networking.tf              # VPC, firewall rules, private service access (Cloud SQL)
 │   │   ├── gcs.tf                     # GCS bucket for resumes
-│   │   ├── iam.tf                     # Service account for Vertex AI access
+│   │   ├── iam.tf                     # Service account for Vertex AI + Cloud SQL access
 │   │   └── variables.tf
 │   ├── scripts/
-│   │   ├── setup-vm.sh                # VM bootstrap: install Node, PostgreSQL, Redis, Nginx, certbot
+│   │   ├── setup-vm.sh                # VM bootstrap: install Node, Redis, Nginx, certbot
 │   │   └── deploy.sh                  # Pull latest code, npm install, run migrations, PM2 reload
 │   └── nginx/
 │       └── resumeai.conf              # Nginx reverse proxy config (SSL termination → localhost:3000)
@@ -829,8 +832,8 @@ resumeai/
 │                    Google Cloud Platform                      │
 │                                                               │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  Compute Engine VM (e2-standard-4)                    │   │
-│  │  4 vCPU / 16GB RAM / 200GB SSD                        │   │
+│  │  Compute Engine VM (e2-standard-2)                    │   │
+│  │  2 vCPU / 8GB RAM / 50GB SSD                          │   │
 │  │  Static external IP + DNS (api.resumeai.app)          │   │
 │  │                                                        │   │
 │  │  ┌────────────────────────────────────────────────┐   │   │
@@ -850,14 +853,20 @@ resumeai/
 │  │  │  - embed-worker (1 instance)                    │   │   │
 │  │  └────────────────────────────────────────────────┘   │   │
 │  │                                                        │   │
-│  │  ┌──────────────┐  ┌───────────────┐                  │   │
-│  │  │ PostgreSQL 15 │  │ Redis 7       │                  │   │
-│  │  │ + pgvector    │  │ (BullMQ +     │                  │   │
-│  │  │ (local)       │  │  sessions +   │                  │   │
-│  │  │               │  │  rate-limit)  │                  │   │
-│  │  │ Data: 200GB   │  │ Memory: 512MB │                  │   │
-│  │  │ SSD           │  │               │                  │   │
-│  │  └──────────────┘  └───────────────┘                  │   │
+│  │  ┌───────────────┐                                    │   │
+│  │  │ Redis 7        │                                    │   │
+│  │  │ (BullMQ +      │                                    │   │
+│  │  │  rate-limit)   │                                    │   │
+│  │  │ Memory: 512MB  │                                    │   │
+│  │  └───────────────┘                                    │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                               │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  Cloud SQL for PostgreSQL 15 (Enterprise edition)     │   │
+│  │  + pgvector extension enabled                         │   │
+│  │  2 vCPU / 8GB RAM / 100GB SSD                         │   │
+│  │  Automated backups, point-in-time recovery            │   │
+│  │  Private IP (same VPC as VM)                          │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                                                               │
 │  ┌───────────────────┐  ┌──────────────────────────────┐    │
@@ -891,21 +900,21 @@ resumeai/
   headers = {X-Forwarded-Host = "resumeai.app"}
 ```
 
-### Cost Estimates (Monthly, ~750K resumes)
+### Cost Estimates (Monthly, ~750K resumes stored)
 
 | Service | Estimated Cost |
 |---------|---------------|
-| Compute Engine VM (e2-standard-4, 4 vCPU, 16GB, sustained) | ~$100/mo |
-| SSD Persistent Disk (200GB) | ~$34/mo |
+| Compute Engine VM (e2-standard-2, 2 vCPU, 8GB) | ~$50/mo |
+| SSD Persistent Disk (50GB for VM) | ~$8.50/mo |
 | Static External IP | ~$3/mo |
+| Cloud SQL PostgreSQL (2 vCPU, 8GB, 100GB SSD, Enterprise) | ~$120/mo |
 | GCS (750K files, ~75GB) | ~$2/mo |
-| Vertex AI Embeddings (initial bulk) | ~$50 one-time |
-| Vertex AI Gemini (extraction + search) | ~$200/mo |
+| Vertex AI Gemini (extraction + search, ongoing) | ~$200/mo |
 | Netlify (Pro plan) | ~$19/mo |
 | Domain + SSL (Let's Encrypt) | $0 |
-| **Total** | **~$360/mo** |
+| **Total** | **~$403/mo** |
 
-> **Cost savings vs. previous plan**: ~$390/mo saved by self-hosting PostgreSQL and Redis on the VM instead of Cloud SQL, eliminating Firebase and Pub/Sub, and using Netlify free/pro tier.
+> VM is now smaller (2 vCPU / 8GB) since PostgreSQL is offloaded to Cloud SQL. Cloud SQL provides automated daily backups, point-in-time recovery, and optional HA failover — no manual `pg_dump` needed.
 
 ---
 
@@ -913,8 +922,8 @@ resumeai/
 
 ### Phase 1: Infrastructure & Foundation (Week 1-2)
 - [ ] Project scaffolding (Turborepo monorepo, frontend, backend)
-- [ ] GCP VM provisioning (Terraform: Compute Engine, GCS, networking)
-- [ ] VM setup script: install Node.js, PostgreSQL + pgvector, Redis, Nginx, PM2
+- [ ] GCP provisioning (Terraform: Compute Engine, Cloud SQL + pgvector, GCS, VPC)
+- [ ] VM setup script: install Node.js, Redis, Nginx, PM2
 - [ ] Nginx config with Let's Encrypt SSL (api.resumeai.app)
 - [ ] Database migrations (users, orgs, sessions, candidates tables)
 - [ ] Session auth system (register, login, logout, express-session + bcrypt)
@@ -955,7 +964,7 @@ resumeai/
 - [ ] Password reset flow
 - [ ] Rate limiting (express-rate-limit with Redis store)
 - [ ] Performance optimization (Redis caching, cursor pagination)
-- [ ] PostgreSQL backup strategy (pg_dump cron → GCS)
+- [ ] Cloud SQL backup verification (automated daily backups enabled by Terraform)
 - [ ] Dark mode
 - [ ] Production hardening (security headers, CORS, CSP)
 
@@ -970,19 +979,25 @@ resumeai/
 - **Scale**: pgvector with HNSW handles 1M vectors with <100ms query times.
 - **Trade-off**: If we exceed ~5M candidates, consider migrating to Vertex AI Vector Search 2.0.
 
-### Why Compute Engine VM over Cloud Run?
-- **Simplicity**: One machine runs everything — API, workers, PostgreSQL, Redis. No service mesh complexity.
-- **Co-location**: PostgreSQL + pgvector on the same machine = sub-1ms query latency (no network hop).
-- **Cost**: A single e2-standard-4 VM (~$100/mo) replaces Cloud Run ($100) + Cloud SQL ($350) + Pub/Sub ($5) = $455/mo.
-- **Persistent processes**: BullMQ workers run continuously, no cold starts. Better for background processing.
-- **Full control**: SSH access for debugging, custom tuning (PostgreSQL shared_buffers, Redis maxmemory).
+### Why Compute Engine VM for API + Workers?
+- **Persistent processes**: BullMQ workers run continuously, no cold starts. Better for background processing than serverless.
+- **Full control**: SSH access for debugging, custom tuning, install any system dependency (e.g., libreoffice for .doc conversion).
+- **Cost-effective**: A single e2-standard-2 VM (~$50/mo) runs the API server + all workers + Redis.
 - **Trade-off**: No auto-scaling. If traffic exceeds one VM's capacity, scale vertically (upgrade VM size) or add a second VM behind a load balancer.
+
+### Why Cloud SQL over self-hosted PostgreSQL?
+- **Managed operations**: Automated daily backups, point-in-time recovery, OS/engine patching — zero DBA effort.
+- **pgvector support**: Cloud SQL supports the pgvector extension natively, so HNSW vector search works out of the box.
+- **HA option**: Single-click regional failover when needed (adds ~$120/mo but provides 99.95% SLA).
+- **Private networking**: Private IP in the same VPC as the VM — ~1-2ms latency, no public internet exposure.
+- **Scaling**: Increase vCPU/RAM or storage without redeploying the VM.
+- **Trade-off**: More expensive than self-hosted PostgreSQL on the VM (~$120/mo vs. $0 extra). Worth it for operational safety at 500K-1M records.
 
 ### Why Native Session Auth over Firebase Auth?
 - **No vendor lock-in**: Full control over auth logic, user data, and session management.
 - **Server-side sessions**: More secure than JWTs — sessions can be instantly revoked (delete from DB).
 - **Simpler architecture**: No Firebase SDK dependency, no cross-service token validation.
-- **Co-located session store**: Sessions in PostgreSQL (connect-pg-simple) — zero additional cost, zero network latency.
+- **Session store**: Sessions in PostgreSQL via connect-pg-simple — zero additional cost.
 - **Trade-off**: No built-in OAuth/social login out of the box. Can add Passport.js strategies later if needed (Google, LinkedIn OAuth).
 
 ### Why Netlify + API proxy over Firebase Hosting?
@@ -1004,9 +1019,221 @@ resumeai/
 - **Node.js native**: First-class TypeScript support, runs in the same process model.
 - **Trade-off**: Not as durable as Pub/Sub. If Redis crashes, pending jobs are lost (mitigated by Redis persistence: AOF + RDB snapshots).
 
-### Why pgvector over a dedicated vector DB (Pinecone/Weaviate)?
-- **Simplicity**: One database for structured data + vectors. No sync overhead.
-- **Cost**: No additional managed service cost. Runs on the same VM.
-- **Hybrid search**: Native SQL filters combined with vector search in one query.
-- **Scale**: pgvector with HNSW handles 1M vectors with <100ms query times.
-- **Trade-off**: If we exceed ~5M candidates, consider migrating to Vertex AI Vector Search 2.0.
+---
+
+## 13. Detailed AI Pipeline Pricing (Per 1,000 Units)
+
+> All prices based on Vertex AI pricing as of Feb 2026:
+> - **Gemini 2.0 Flash**: $0.10 / 1M input tokens, $0.40 / 1M output tokens
+> - **text-embedding-005**: $0.10 / 1M input tokens
+>
+> Token estimation: ~4 characters = 1 token (including whitespace)
+
+---
+
+### A. Processing 1,000 Resumes (Ingestion Pipeline)
+
+The ingestion pipeline has 3 stages that incur AI costs. Stage 1 (text extraction) is local and free.
+
+#### Stage 2: LLM Structured Extraction (Gemini 2.0 Flash)
+
+Each resume goes through Gemini to extract name, skills, experience, education, etc. into structured JSON.
+
+```
+Per resume:
+  Input tokens:
+    - System prompt (extraction instructions)    ~500 tokens
+    - Resume text (avg 800 words ≈ 1,000 tokens) ~1,000 tokens
+    ─────────────────────────────────────────────
+    Total input per resume                       ~1,500 tokens
+
+  Output tokens:
+    - Structured JSON (name, skills, experience,
+      education, certifications, LLM summary)    ~800 tokens
+    ─────────────────────────────────────────────
+    Total output per resume                      ~800 tokens
+```
+
+| | Per Resume | Per 1,000 Resumes |
+|---|---|---|
+| Input (1,500 tokens × $0.10/1M) | $0.000150 | **$0.15** |
+| Output (800 tokens × $0.40/1M) | $0.000320 | **$0.32** |
+| **Subtotal** | **$0.000470** | **$0.47** |
+
+#### Stage 3: Embedding Generation (text-embedding-005)
+
+Each resume gets a 768-dim embedding vector from a concatenated text of: LLM summary + title + skills + highlights.
+
+```
+Per resume:
+  Input tokens:
+    - LLM-generated summary              ~200 tokens
+    - Current title                       ~10 tokens
+    - Skills (comma-separated, ~15 skills) ~50 tokens
+    - Recent work highlights              ~150 tokens
+    ─────────────────────────────────────────────
+    Total input per resume                ~410 tokens
+```
+
+| | Per Resume | Per 1,000 Resumes |
+|---|---|---|
+| Input (410 tokens × $0.10/1M) | $0.000041 | **$0.04** |
+| **Subtotal** | **$0.000041** | **$0.04** |
+
+#### Total: Ingesting 1,000 Resumes
+
+| Stage | Cost |
+|-------|------|
+| Stage 1: Text extraction (local — pdf-parse/officeparser) | $0.00 |
+| Stage 2: LLM structured extraction (Gemini 2.0 Flash) | $0.47 |
+| Stage 3: Embedding generation (text-embedding-005) | $0.04 |
+| **Total for 1,000 resumes** | **$0.51** |
+
+#### Extrapolation
+
+| Volume | Cost |
+|--------|------|
+| 1,000 resumes | $0.51 |
+| 10,000 resumes | $5.10 |
+| 100,000 resumes (1 lakh) | $51.00 |
+| 500,000 resumes (5 lakh) | $255.00 |
+| 1,000,000 resumes (10 lakh) | $510.00 |
+
+> This is a **one-time ingestion cost**. Once a resume is processed, it doesn't need re-processing unless the extraction model is upgraded.
+
+---
+
+### B. Processing 1,000 Search Queries (Search Pipeline)
+
+Each search query goes through 4 AI-powered steps. Steps 3 (vector search) is a database operation with no AI cost.
+
+#### Step 1: Query Understanding (Gemini 2.0 Flash)
+
+The recruiter's natural language query is parsed into structured search intent (semantic query + filters + ranking signals).
+
+```
+Per query:
+  Input tokens:
+    - System prompt (query parsing instructions)  ~300 tokens
+    - User's natural language query                ~50 tokens
+    ─────────────────────────────────────────────
+    Total input per query                          ~350 tokens
+
+  Output tokens:
+    - Structured intent JSON (semantic_query,
+      filters, ranking_signals)                    ~200 tokens
+    ─────────────────────────────────────────────
+    Total output per query                         ~200 tokens
+```
+
+| | Per Query | Per 1,000 Queries |
+|---|---|---|
+| Input (350 tokens × $0.10/1M) | $0.000035 | **$0.035** |
+| Output (200 tokens × $0.40/1M) | $0.000080 | **$0.080** |
+| **Subtotal** | **$0.000115** | **$0.115** |
+
+#### Step 2: Query Embedding (text-embedding-005)
+
+The semantic query is embedded for vector similarity search.
+
+```
+Per query:
+  Input tokens:
+    - Semantic query text                          ~100 tokens
+```
+
+| | Per Query | Per 1,000 Queries |
+|---|---|---|
+| Input (100 tokens × $0.10/1M) | $0.000010 | **$0.01** |
+| **Subtotal** | **$0.000010** | **$0.01** |
+
+#### Step 3: Vector Search + Metadata Filtering (pgvector — Cloud SQL)
+
+This is a database operation — no AI token cost. pgvector performs HNSW approximate nearest neighbor search combined with SQL WHERE clauses. Typically completes in 50-100ms.
+
+| | Per Query | Per 1,000 Queries |
+|---|---|---|
+| **Subtotal (database only)** | **$0.00** | **$0.00** |
+
+#### Step 4: LLM Re-ranking & Reasoning (Gemini 2.0 Flash)
+
+The top 50 candidates from vector search are sent to Gemini for deep evaluation. Batched 10 candidates per LLM call = **5 calls per search**.
+
+```
+Per LLM call (10 candidates):
+  Input tokens:
+    - System prompt (ranking instructions)         ~300 tokens
+    - Original query + search context              ~200 tokens
+    - 10 candidate summaries (10 × 500 tokens)     ~5,000 tokens
+    ─────────────────────────────────────────────
+    Total input per call                           ~5,500 tokens
+
+  Output tokens:
+    - 10 scored results with:
+      - match_score (0-100)
+      - strengths[]
+      - gaps[]
+      - evidence[]
+      - reasoning text                             ~1,500 tokens
+    ─────────────────────────────────────────────
+    Total output per call                          ~1,500 tokens
+
+Per search query (5 calls × above):
+    Total input: 5 × 5,500  = 27,500 tokens
+    Total output: 5 × 1,500 = 7,500 tokens
+```
+
+| | Per Query (5 calls) | Per 1,000 Queries |
+|---|---|---|
+| Input (27,500 tokens × $0.10/1M) | $0.00275 | **$2.75** |
+| Output (7,500 tokens × $0.40/1M) | $0.00300 | **$3.00** |
+| **Subtotal** | **$0.00575** | **$5.75** |
+
+#### Total: 1,000 Search Queries
+
+| Step | Cost |
+|------|------|
+| Step 1: Query understanding (Gemini 2.0 Flash) | $0.115 |
+| Step 2: Query embedding (text-embedding-005) | $0.01 |
+| Step 3: Vector search + filtering (Cloud SQL pgvector) | $0.00 |
+| Step 4: LLM re-ranking & reasoning (Gemini 2.0 Flash) | $5.75 |
+| **Total for 1,000 search queries** | **$5.88** |
+
+> **Cost per search query: ~$0.006 (less than 1 cent)**
+
+#### Extrapolation
+
+| Volume | Cost |
+|--------|------|
+| 100 searches/day | $0.59/day → **$17.64/mo** |
+| 500 searches/day | $2.94/day → **$88.20/mo** |
+| 1,000 searches/day | $5.88/day → **$176.40/mo** |
+
+---
+
+### C. Combined Monthly Estimate (Realistic Usage)
+
+Scenario: **750K resumes already ingested**, 500 new resumes/day, 200 searches/day.
+
+| Item | Calculation | Monthly Cost |
+|------|------------|-------------|
+| **Infrastructure** | | |
+| Compute Engine VM (e2-standard-2) | Fixed | $50 |
+| Cloud SQL (2 vCPU, 8GB, 100GB SSD) | Fixed | $120 |
+| GCS Storage (75GB) | Fixed | $2 |
+| Netlify Pro | Fixed | $19 |
+| Static IP | Fixed | $3 |
+| **AI — Ingestion** | | |
+| New resume extraction (500/day × 30) | 15,000 × $0.00047 | $7.05 |
+| New resume embedding (500/day × 30) | 15,000 × $0.000041 | $0.62 |
+| **AI — Search** | | |
+| Query understanding (200/day × 30) | 6,000 × $0.000115 | $0.69 |
+| Query embedding (200/day × 30) | 6,000 × $0.000010 | $0.06 |
+| LLM re-ranking (200/day × 30) | 6,000 × $0.00575 | $34.50 |
+| | | |
+| **Grand Total** | | **~$237/mo** |
+
+> The dominant ongoing AI cost is **LLM re-ranking** ($34.50/mo at 200 searches/day). This can be reduced by:
+> - Reducing the re-ranking batch from top 50 → top 30 candidates (3 LLM calls instead of 5)
+> - Caching re-ranking results for identical or near-identical queries
+> - Using Gemini 2.5 Flash-Lite ($0.075 / 1M input) when available for ranking tasks
