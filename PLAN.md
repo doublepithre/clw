@@ -26,17 +26,17 @@ A SaaS platform that enables recruiters to search through 5-10 lakh (500K–1M) 
 | **State Management** | TanStack Query + Zustand | Server state caching + minimal client state |
 | **Backend** | Node.js + Express | Lightweight, high-throughput API server |
 | **Language** | TypeScript (full stack) | Type safety across the entire codebase |
-| **Database** | PostgreSQL (Cloud SQL) + pgvector | Relational data + vector similarity search |
+| **Database** | PostgreSQL (installed on VM) + pgvector | Relational data + vector similarity search, co-located for low latency |
 | **Object Storage** | Google Cloud Storage (GCS) | Raw resume file storage (PDF/DOCX) |
 | **Vector Embeddings** | Vertex AI Embeddings API (`text-embedding-005`) | 768-dim embeddings, GCP-native |
 | **LLM** | Vertex AI (Gemini 2.0 Flash) | Query understanding, match reasoning, data extraction |
-| **Queue/Async** | Google Cloud Pub/Sub | Async pipeline orchestration |
-| **Resume Processing** | Cloud Run Jobs | Scalable batch/event-driven resume parsing |
-| **API Hosting** | Cloud Run | Serverless, auto-scaling API |
-| **Auth** | Firebase Auth | Google-native auth with social login |
-| **CDN/Frontend** | Firebase Hosting | Global CDN for the SPA |
-| **Monitoring** | Cloud Logging + Cloud Monitoring | Observability |
-| **CI/CD** | Cloud Build | GCP-native CI/CD pipeline |
+| **Queue/Async** | BullMQ + Redis (on VM) | Async pipeline orchestration, no managed service cost |
+| **Resume Processing** | Worker processes (on VM) | Background workers via BullMQ on the same VM |
+| **API Hosting** | GCP Compute Engine VM | Persistent VM running Node.js via PM2/systemd |
+| **Auth** | Native session auth (express-session + bcrypt) | Server-side sessions stored in PostgreSQL, no third-party dependency |
+| **CDN/Frontend** | Netlify | Global CDN, auto-deploys from git, API proxy to GCP VM |
+| **Monitoring** | Cloud Logging + PM2 logs + UptimeRobot | Observability |
+| **CI/CD** | GitHub Actions + Netlify (frontend) | CI runs tests, deploys backend via SSH to VM |
 
 ---
 
@@ -45,55 +45,56 @@ A SaaS platform that enables recruiters to search through 5-10 lakh (500K–1M) 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              FRONTEND (React SPA)                          │
-│   Firebase Hosting / CDN                                                   │
+│   Netlify CDN (auto-deploy from Git)                                       │
 │                                                                             │
 │  ┌──────────┐ ┌───────────┐ ┌──────────────┐ ┌──────────┐ ┌────────────┐  │
 │  │ Dashboard │ │  Search   │ │  Candidate   │ │  Upload  │ │  Settings  │  │
 │  │   Page   │ │   Page    │ │  Profile     │ │  Center  │ │   Page     │  │
 │  └──────────┘ └───────────┘ └──────────────┘ └──────────┘ └────────────┘  │
 └─────────────────────────────┬───────────────────────────────────────────────┘
-                              │ HTTPS / REST + WebSocket
+                              │ HTTPS (Netlify proxy: /api/* → GCP VM)
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         API GATEWAY (Cloud Run)                            │
+│                    GCP COMPUTE ENGINE VM (API + Workers)                    │
+│                    (e.g., e2-standard-4: 4 vCPU, 16GB RAM)                 │
 │                                                                             │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐  │
-│  │  Auth        │ │  Search      │ │  Candidate   │ │  Upload          │  │
-│  │  Middleware  │ │  Controller  │ │  Controller  │ │  Controller      │  │
-│  └──────────────┘ └──────┬───────┘ └──────────────┘ └───────┬──────────┘  │
-│                          │                                    │             │
-│  ┌──────────────┐ ┌──────┴───────┐ ┌──────────────┐ ┌───────┴──────────┐  │
-│  │  Rate        │ │  Search      │ │  Candidate   │ │  Ingestion       │  │
-│  │  Limiter     │ │  Service     │ │  Service     │ │  Service         │  │
-│  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────────┘  │
-└────────┬────────────────┬──────────────────┬────────────────┬──────────────┘
-         │                │                  │                │
-         ▼                ▼                  ▼                ▼
-┌──────────────┐ ┌────────────────┐ ┌────────────────┐ ┌──────────────────┐
-│  Firebase    │ │  PostgreSQL    │ │  GCS Bucket    │ │  Pub/Sub         │
-│  Auth        │ │  + pgvector    │ │  (Resume       │ │  (Pipeline       │
-│              │ │  (Cloud SQL)   │ │   Files)       │ │   Events)        │
-└──────────────┘ └────────────────┘ └────────────────┘ └────────┬─────────┘
-                                                                 │
-                              ┌──────────────────────────────────┘
-                              ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     RESUME PROCESSING PIPELINE (Cloud Run Jobs)            │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │  Node.js API Server (Express) — managed by PM2 / systemd            │  │
+│  │                                                                      │  │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌────────────┐ │  │
+│  │  │  Session     │ │  Search      │ │  Candidate   │ │  Upload    │ │  │
+│  │  │  Auth MW     │ │  Controller  │ │  Controller  │ │  Controller│ │  │
+│  │  └──────────────┘ └──────┬───────┘ └──────────────┘ └──────┬─────┘ │  │
+│  │                          │                                  │       │  │
+│  │  ┌──────────────┐ ┌──────┴───────┐ ┌──────────────┐ ┌──────┴─────┐│  │
+│  │  │  Rate        │ │  Search      │ │  Candidate   │ │  Ingestion ││  │
+│  │  │  Limiter     │ │  Service     │ │  Service     │ │  Service   ││  │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘ └────────────┘│  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │
-│  Stage 1: Parse        Stage 2: Extract       Stage 3: Embed               │
-│  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐             │
-│  │ PDF/DOCX     │─────▶│ LLM-based    │─────▶│ Generate     │             │
-│  │ Text         │      │ Structured   │      │ Vector       │             │
-│  │ Extraction   │      │ Data Extract │      │ Embeddings   │             │
-│  └──────────────┘      └──────────────┘      └──────┬───────┘             │
-│                                                      │                     │
-│                                                      ▼                     │
-│                                              ┌──────────────┐             │
-│                                              │ Store in     │             │
-│                                              │ PostgreSQL   │             │
-│                                              │ + pgvector   │             │
-│                                              └──────────────┘             │
-└─────────────────────────────────────────────────────────────────────────────┘
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │  BullMQ Workers (background processes managed by PM2)               │  │
+│  │                                                                      │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │  │
+│  │  │ Parse Worker  │  │Extract Worker│  │ Embed Worker │              │  │
+│  │  │ (PDF/DOCX)   │  │ (Gemini LLM) │  │ (Vertex AI)  │              │  │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘              │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  ┌───────────────┐  ┌────────────────┐  ┌────────────────┐               │
+│  │ PostgreSQL 15  │  │  Redis         │  │  Nginx         │               │
+│  │ + pgvector     │  │  (BullMQ +     │  │  (reverse      │               │
+│  │ (local)        │  │   sessions)    │  │   proxy + SSL) │               │
+│  └───────────────┘  └────────────────┘  └────────────────┘               │
+└────────────────────────────┬────────────────────────────────────────────────┘
+                             │
+                    ┌────────┴────────┐
+                    ▼                 ▼
+          ┌────────────────┐  ┌──────────────────────────────────────┐
+          │  GCS Bucket    │  │  Vertex AI                           │
+          │  (Resume       │  │  - Embeddings API (text-embedding-005)│
+          │   Files)       │  │  - Gemini 2.0 Flash                  │
+          └────────────────┘  └──────────────────────────────────────┘
 ```
 
 ---
@@ -110,14 +111,14 @@ Recruiter uploads PDF/DOCX
         ▼
 ┌─────────────────┐
 │  Upload API     │ ── Validates file type, size (max 10MB)
-│  (Cloud Run)    │ ── Generates unique ID
+│  (Express on VM)│ ── Generates unique ID
 └────────┬────────┘
          │
     ┌────┴────┐
     ▼         ▼
 ┌────────┐ ┌──────────┐
-│  GCS   │ │  Pub/Sub │ ── Publishes "resume.uploaded" event
-│ Bucket │ │  Topic   │
+│  GCS   │ │  BullMQ  │ ── Enqueues "resume.parse" job
+│ Bucket │ │  Queue   │
 └────────┘ └──────────┘
 ```
 
@@ -128,7 +129,7 @@ Recruiter uploads PDF/DOCX
 ### Stage 2: Text Extraction
 
 ```
-Pub/Sub triggers Cloud Run Job
+BullMQ triggers Parse Worker (on VM)
         │
         ▼
 ┌─────────────────────────────────┐
@@ -377,14 +378,27 @@ CREATE TABLE organizations (
 CREATE TABLE users (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id          UUID REFERENCES organizations(id),
-    firebase_uid    VARCHAR(128) UNIQUE NOT NULL,
-    email           VARCHAR(255) NOT NULL,
+    email           VARCHAR(255) UNIQUE NOT NULL,
+    password_hash   VARCHAR(255) NOT NULL,        -- bcrypt hashed password
     name            VARCHAR(255),
     role            VARCHAR(50) DEFAULT 'recruiter', -- admin, recruiter, viewer
     avatar_url      TEXT,
+    email_verified  BOOLEAN DEFAULT FALSE,
+    invite_token    VARCHAR(64),                   -- For team member invites
+    reset_token     VARCHAR(64),                   -- For password reset
+    reset_token_exp TIMESTAMPTZ,
+    last_login_at   TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Sessions (server-side session store for express-session)
+CREATE TABLE sessions (
+    sid             VARCHAR(255) PRIMARY KEY,
+    sess            JSONB NOT NULL,                -- Session data (user_id, org_id, role)
+    expire          TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX idx_sessions_expire ON sessions(expire);
 
 -- Candidates (core entity)
 CREATE TABLE candidates (
@@ -523,16 +537,25 @@ CREATE INDEX idx_shortlist_share ON shortlists(share_token) WHERE share_enabled 
 ## 7. API Design
 
 ### Authentication
-All endpoints require `Authorization: Bearer <firebase_id_token>` header.
+Session-based authentication using `express-session` with `connect-pg-simple` (PostgreSQL session store).
+Sessions are stored server-side in PostgreSQL. The client receives an `HttpOnly`, `Secure`, `SameSite=Strict` cookie (`sid`).
+All protected endpoints check `req.session.userId` — returns 401 if not authenticated.
 
 ### Endpoints
 
 ```
-BASE URL: https://api.resumeai.app/v1
+BASE URL: https://resumeai.app/api/v1
+(Netlify proxies /api/* → https://<VM_IP>:443/api/*)
 
 ─── Auth ───
-POST   /auth/register              Register org + first user
-POST   /auth/invite                Invite team member
+POST   /auth/register              Register org + first admin user (email + password)
+POST   /auth/login                 Login with email + password → sets session cookie
+POST   /auth/logout                Destroy session + clear cookie
+GET    /auth/me                    Get current user from session
+POST   /auth/forgot-password       Send password reset email
+POST   /auth/reset-password        Reset password with token
+POST   /auth/invite                Invite team member (sends email with invite link)
+POST   /auth/accept-invite         Accept invite + set password
 
 ─── Candidates ───
 GET    /candidates                 List candidates (paginated, filterable)
@@ -700,22 +723,38 @@ resumeai/
 │   │   │   ├── shortlists/           # ShortlistCard, ShortlistShare
 │   │   │   └── dashboard/            # StatCards, ActivityFeed
 │   │   ├── pages/                     # Route-level components
-│   │   ├── hooks/                     # Custom hooks (useSearch, useCandidates)
-│   │   ├── lib/                       # Utilities, API client, auth
+│   │   ├── hooks/                     # Custom hooks (useSearch, useCandidates, useAuth)
+│   │   ├── lib/                       # Utilities, API client (with credentials: 'include')
 │   │   ├── stores/                    # Zustand stores
 │   │   ├── types/                     # TypeScript types/interfaces
 │   │   └── App.tsx
+│   ├── netlify.toml                   # Netlify config: redirects, proxy rules, build
 │   ├── tailwind.config.ts
 │   ├── vite.config.ts
 │   └── package.json
 │
 ├── backend/                           # Node.js API
 │   ├── src/
-│   │   ├── config/                    # Environment, database, GCP configs
-│   │   ├── middleware/                # Auth, rate-limit, error handling, validation
+│   │   ├── config/                    # Environment, database, Redis, GCP configs
+│   │   │   ├── database.ts            # PostgreSQL connection pool (pg)
+│   │   │   ├── redis.ts               # Redis connection (ioredis)
+│   │   │   ├── session.ts             # express-session + connect-pg-simple config
+│   │   │   └── gcp.ts                 # GCS + Vertex AI client setup
+│   │   ├── middleware/
+│   │   │   ├── auth.ts                # Session auth middleware (checks req.session.userId)
+│   │   │   ├── rate-limit.ts          # Rate limiter (express-rate-limit with Redis store)
+│   │   │   ├── validation.ts          # Request validation (zod)
+│   │   │   └── error-handler.ts       # Global error handler
 │   │   ├── routes/                    # Express route definitions
+│   │   │   ├── auth.routes.ts         # Login, register, logout, reset password
+│   │   │   ├── candidate.routes.ts
+│   │   │   ├── search.routes.ts
+│   │   │   ├── job.routes.ts
+│   │   │   ├── shortlist.routes.ts
+│   │   │   └── analytics.routes.ts
 │   │   ├── controllers/              # Request handlers
 │   │   ├── services/                  # Business logic
+│   │   │   ├── auth.service.ts        # Registration, login, password hashing (bcrypt)
 │   │   │   ├── search.service.ts      # Search orchestration
 │   │   │   ├── embedding.service.ts   # Vertex AI embeddings
 │   │   │   ├── llm.service.ts         # Gemini interactions
@@ -723,32 +762,45 @@ resumeai/
 │   │   │   ├── extraction.service.ts  # LLM-based structured extraction
 │   │   │   ├── candidate.service.ts   # Candidate CRUD
 │   │   │   ├── shortlist.service.ts   # Shortlist management
+│   │   │   ├── email.service.ts       # Invite/reset emails (Nodemailer or Resend)
 │   │   │   └── upload.service.ts      # File upload handling
-│   │   ├── workers/                   # Pipeline workers
+│   │   ├── workers/                   # BullMQ pipeline workers
+│   │   │   ├── index.ts               # Worker bootstrap (registers all queues)
 │   │   │   ├── parse.worker.ts        # Text extraction worker
 │   │   │   ├── extract.worker.ts      # LLM extraction worker
 │   │   │   └── embed.worker.ts        # Embedding generation worker
 │   │   ├── models/                    # Database models / queries
 │   │   ├── types/                     # Shared TypeScript types
-│   │   └── app.ts                     # Express app setup
-│   ├── migrations/                    # PostgreSQL migrations
-│   ├── Dockerfile
+│   │   ├── app.ts                     # Express app setup
+│   │   └── server.ts                  # HTTP server entry point
+│   ├── migrations/                    # PostgreSQL migrations (node-pg-migrate)
+│   ├── ecosystem.config.js            # PM2 process config (api + workers)
+│   ├── Dockerfile                     # For local dev (docker-compose)
 │   └── package.json
 │
 ├── shared/                            # Shared types between frontend & backend
 │   └── types/
 │
-├── infra/                             # Infrastructure as Code
+├── infra/                             # Infrastructure & Deployment
 │   ├── terraform/                     # GCP infrastructure
 │   │   ├── main.tf
-│   │   ├── cloud-run.tf
-│   │   ├── cloud-sql.tf
-│   │   ├── pubsub.tf
-│   │   ├── gcs.tf
+│   │   ├── compute.tf                 # Compute Engine VM definition
+│   │   ├── networking.tf              # VPC, firewall rules (allow 443, deny all else)
+│   │   ├── gcs.tf                     # GCS bucket for resumes
+│   │   ├── iam.tf                     # Service account for Vertex AI access
 │   │   └── variables.tf
-│   └── cloudbuild.yaml                # CI/CD pipeline
+│   ├── scripts/
+│   │   ├── setup-vm.sh                # VM bootstrap: install Node, PostgreSQL, Redis, Nginx, certbot
+│   │   └── deploy.sh                  # Pull latest code, npm install, run migrations, PM2 reload
+│   └── nginx/
+│       └── resumeai.conf              # Nginx reverse proxy config (SSL termination → localhost:3000)
 │
-├── docker-compose.yml                 # Local development
+├── .github/
+│   └── workflows/
+│       ├── deploy-backend.yml         # SSH into VM, pull, build, migrate, restart PM2
+│       └── deploy-frontend.yml        # Netlify auto-deploys from git (or manual trigger)
+│
+├── docker-compose.yml                 # Local development (PostgreSQL + Redis)
 ├── .env.example
 ├── package.json                       # Root workspace
 ├── turbo.json                         # Turborepo config
@@ -760,111 +812,152 @@ resumeai/
 ## 10. GCP Deployment Architecture
 
 ```
+┌──────────────────┐
+│  Netlify CDN      │
+│  (Frontend SPA)   │
+│                    │
+│  - Auto-deploy    │
+│    from Git       │
+│  - _redirects:    │
+│    /api/* → VM    │
+│  - Free tier or   │
+│    Pro ($19/mo)   │
+└────────┬─────────┘
+         │ Netlify proxy: /api/* → https://api.resumeai.app
+         ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Google Cloud Platform                      │
 │                                                               │
-│  ┌─────────────────┐    ┌──────────────────────────────┐    │
-│  │ Firebase Hosting │    │ Cloud Run (API)               │    │
-│  │ (Frontend SPA)   │───▶│ - Min instances: 1            │    │
-│  │ + CDN            │    │ - Max instances: 10           │    │
-│  └─────────────────┘    │ - CPU: 2 / Memory: 2Gi        │    │
-│                          │ - Concurrency: 80              │    │
-│                          └───────┬──────────────────────┘    │
-│                                  │                            │
-│         ┌────────────────────────┼────────────────────┐      │
-│         ▼                        ▼                    ▼      │
-│  ┌──────────────┐  ┌───────────────────┐  ┌───────────────┐ │
-│  │ Cloud SQL     │  │ GCS Bucket        │  │ Pub/Sub       │ │
-│  │ PostgreSQL 15 │  │ (Resume storage)  │  │ Topics:       │ │
-│  │ + pgvector    │  │ Standard class    │  │ - resume.parse│ │
-│  │               │  │ Lifecycle: 90d →  │  │ - resume.extract│
-│  │ HA: Regional  │  │   Nearline        │  │ - resume.embed│ │
-│  │ vCPU: 4       │  │                   │  │               │ │
-│  │ RAM: 16GB     │  │                   │  │               │ │
-│  │ SSD: 100GB    │  │                   │  │               │ │
-│  └──────────────┘  └───────────────────┘  └───────┬───────┘ │
-│                                                     │        │
-│                                           ┌─────────▼──────┐ │
-│                                           │ Cloud Run Jobs  │ │
-│                                           │ (Workers)       │ │
-│                                           │                 │ │
-│                                           │ - Parse Worker  │ │
-│                                           │ - Extract Worker│ │
-│                                           │ - Embed Worker  │ │
-│                                           │                 │ │
-│                                           │ CPU: 4 / 8Gi   │ │
-│                                           │ Timeout: 15min  │ │
-│                                           └─────────────────┘ │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  Compute Engine VM (e2-standard-4)                    │   │
+│  │  4 vCPU / 16GB RAM / 200GB SSD                        │   │
+│  │  Static external IP + DNS (api.resumeai.app)          │   │
+│  │                                                        │   │
+│  │  ┌────────────────────────────────────────────────┐   │   │
+│  │  │  Nginx (reverse proxy + SSL via Let's Encrypt)  │   │   │
+│  │  │  :443 → localhost:3000                          │   │   │
+│  │  └────────────────────────────────────────────────┘   │   │
+│  │                                                        │   │
+│  │  ┌────────────────────────────────────────────────┐   │   │
+│  │  │  Node.js API (Express) — PM2 cluster mode      │   │   │
+│  │  │  Port 3000, 2 instances                         │   │   │
+│  │  └────────────────────────────────────────────────┘   │   │
+│  │                                                        │   │
+│  │  ┌────────────────────────────────────────────────┐   │   │
+│  │  │  BullMQ Workers — PM2 managed                   │   │   │
+│  │  │  - parse-worker (1 instance)                    │   │   │
+│  │  │  - extract-worker (2 instances)                 │   │   │
+│  │  │  - embed-worker (1 instance)                    │   │   │
+│  │  └────────────────────────────────────────────────┘   │   │
+│  │                                                        │   │
+│  │  ┌──────────────┐  ┌───────────────┐                  │   │
+│  │  │ PostgreSQL 15 │  │ Redis 7       │                  │   │
+│  │  │ + pgvector    │  │ (BullMQ +     │                  │   │
+│  │  │ (local)       │  │  sessions +   │                  │   │
+│  │  │               │  │  rate-limit)  │                  │   │
+│  │  │ Data: 200GB   │  │ Memory: 512MB │                  │   │
+│  │  │ SSD           │  │               │                  │   │
+│  │  └──────────────┘  └───────────────┘                  │   │
+│  └──────────────────────────────────────────────────────┘   │
 │                                                               │
-│  ┌──────────────────────────────────────────────────────┐    │
-│  │ Vertex AI                                             │    │
-│  │ - Embeddings API (text-embedding-005)                 │    │
-│  │ - Gemini 2.0 Flash (extraction + ranking)             │    │
-│  └──────────────────────────────────────────────────────┘    │
+│  ┌───────────────────┐  ┌──────────────────────────────┐    │
+│  │ GCS Bucket         │  │ Vertex AI                     │    │
+│  │ (Resume storage)   │  │ - text-embedding-005          │    │
+│  │ Standard class     │  │ - Gemini 2.0 Flash            │    │
+│  │ Lifecycle: 90d →   │  │                               │    │
+│  │   Nearline          │  │                               │    │
+│  └───────────────────┘  └──────────────────────────────┘    │
 │                                                               │
-│  ┌────────────────┐  ┌────────────┐  ┌──────────────────┐   │
-│  │ Firebase Auth   │  │ Secret Mgr │  │ Cloud Monitoring  │   │
-│  │ (Authentication)│  │ (API keys) │  │ + Cloud Logging   │   │
-│  └────────────────┘  └────────────┘  └──────────────────┘   │
+│  ┌────────────┐  ┌──────────────────┐                       │
+│  │ Secret Mgr │  │ Cloud Monitoring  │                       │
+│  │ (API keys) │  │ + Cloud Logging   │                       │
+│  └────────────┘  └──────────────────┘                       │
 └─────────────────────────────────────────────────────────────┘
+```
+
+### Netlify Proxy Configuration (`netlify.toml`)
+
+```toml
+[build]
+  base = "frontend"
+  command = "npm run build"
+  publish = "dist"
+
+[[redirects]]
+  from = "/api/*"
+  to = "https://api.resumeai.app/api/:splat"
+  status = 200
+  force = true
+  headers = {X-Forwarded-Host = "resumeai.app"}
 ```
 
 ### Cost Estimates (Monthly, ~750K resumes)
 
 | Service | Estimated Cost |
 |---------|---------------|
-| Cloud SQL (4 vCPU, 16GB, HA) | ~$350/mo |
-| Cloud Run (API, avg 2 instances) | ~$100/mo |
-| Cloud Run Jobs (workers) | ~$50/mo (scales to zero) |
+| Compute Engine VM (e2-standard-4, 4 vCPU, 16GB, sustained) | ~$100/mo |
+| SSD Persistent Disk (200GB) | ~$34/mo |
+| Static External IP | ~$3/mo |
 | GCS (750K files, ~75GB) | ~$2/mo |
 | Vertex AI Embeddings (initial bulk) | ~$50 one-time |
 | Vertex AI Gemini (extraction + search) | ~$200/mo |
-| Firebase Auth + Hosting | ~$25/mo |
-| Pub/Sub | ~$5/mo |
-| **Total** | **~$750/mo** |
+| Netlify (Pro plan) | ~$19/mo |
+| Domain + SSL (Let's Encrypt) | $0 |
+| **Total** | **~$360/mo** |
+
+> **Cost savings vs. previous plan**: ~$390/mo saved by self-hosting PostgreSQL and Redis on the VM instead of Cloud SQL, eliminating Firebase and Pub/Sub, and using Netlify free/pro tier.
 
 ---
 
 ## 11. Implementation Phases
 
-### Phase 1: Foundation (Week 1-2)
-- [ ] Project scaffolding (monorepo, frontend, backend)
-- [ ] Database setup with migrations
-- [ ] Firebase Auth integration
-- [ ] Basic CRUD API (candidates, jobs)
-- [ ] File upload to GCS
-- [ ] Frontend: Login, Dashboard, Upload page
+### Phase 1: Infrastructure & Foundation (Week 1-2)
+- [ ] Project scaffolding (Turborepo monorepo, frontend, backend)
+- [ ] GCP VM provisioning (Terraform: Compute Engine, GCS, networking)
+- [ ] VM setup script: install Node.js, PostgreSQL + pgvector, Redis, Nginx, PM2
+- [ ] Nginx config with Let's Encrypt SSL (api.resumeai.app)
+- [ ] Database migrations (users, orgs, sessions, candidates tables)
+- [ ] Session auth system (register, login, logout, express-session + bcrypt)
+- [ ] Netlify setup with proxy redirects to GCP VM
+- [ ] Frontend: Login, Register, basic layout shell
+- [ ] GitHub Actions CI/CD pipeline (SSH deploy to VM)
 
-### Phase 2: Processing Pipeline (Week 3-4)
-- [ ] Text extraction service (PDF/DOCX)
-- [ ] LLM-based structured extraction (Gemini)
-- [ ] Embedding generation service
-- [ ] Pub/Sub pipeline orchestration
-- [ ] Processing status tracking
-- [ ] Frontend: Upload progress, candidate list
+### Phase 2: Upload & Processing Pipeline (Week 3-4)
+- [ ] File upload API (multer → GCS)
+- [ ] BullMQ + Redis queue setup
+- [ ] Parse worker: PDF/DOCX text extraction
+- [ ] Extract worker: Gemini-based structured data extraction
+- [ ] Embed worker: Vertex AI embedding generation + pgvector storage
+- [ ] Processing status tracking + error handling
+- [ ] PM2 ecosystem config for API + all workers
+- [ ] Frontend: Upload center (drag-drop, progress, status)
+- [ ] Frontend: Candidate list page
 
 ### Phase 3: Search (Week 5-6)
-- [ ] Query understanding service (LLM)
-- [ ] Vector similarity search (pgvector)
-- [ ] Hybrid search (vector + metadata filters)
+- [ ] Query understanding service (Gemini)
+- [ ] Vector similarity search (pgvector HNSW)
+- [ ] Hybrid search (vector + SQL metadata filters)
 - [ ] LLM re-ranking with reasoning
-- [ ] Frontend: Search page with filters and results
+- [ ] Frontend: Search page with natural language bar + filters
+- [ ] Frontend: Result cards with scores, strengths, gaps
 
 ### Phase 4: Shortlists & Sharing (Week 7)
 - [ ] Shortlist CRUD
 - [ ] Save search results to shortlist
 - [ ] Secure sharing with token-based access
-- [ ] Public shortlist view
+- [ ] Public shortlist view (no auth)
 - [ ] Frontend: Shortlist management and sharing
 
-### Phase 5: Polish & Deploy (Week 8)
+### Phase 5: Polish & Harden (Week 8)
 - [ ] Dashboard analytics
 - [ ] Bulk upload (ZIP support)
-- [ ] Performance optimization (caching, pagination)
-- [ ] Terraform infrastructure setup
-- [ ] CI/CD pipeline (Cloud Build)
-- [ ] Production deployment
+- [ ] Team invite flow (email invites, accept-invite page)
+- [ ] Password reset flow
+- [ ] Rate limiting (express-rate-limit with Redis store)
+- [ ] Performance optimization (Redis caching, cursor pagination)
+- [ ] PostgreSQL backup strategy (pg_dump cron → GCS)
 - [ ] Dark mode
+- [ ] Production hardening (security headers, CORS, CSP)
 
 ---
 
@@ -877,19 +970,43 @@ resumeai/
 - **Scale**: pgvector with HNSW handles 1M vectors with <100ms query times.
 - **Trade-off**: If we exceed ~5M candidates, consider migrating to Vertex AI Vector Search 2.0.
 
+### Why Compute Engine VM over Cloud Run?
+- **Simplicity**: One machine runs everything — API, workers, PostgreSQL, Redis. No service mesh complexity.
+- **Co-location**: PostgreSQL + pgvector on the same machine = sub-1ms query latency (no network hop).
+- **Cost**: A single e2-standard-4 VM (~$100/mo) replaces Cloud Run ($100) + Cloud SQL ($350) + Pub/Sub ($5) = $455/mo.
+- **Persistent processes**: BullMQ workers run continuously, no cold starts. Better for background processing.
+- **Full control**: SSH access for debugging, custom tuning (PostgreSQL shared_buffers, Redis maxmemory).
+- **Trade-off**: No auto-scaling. If traffic exceeds one VM's capacity, scale vertically (upgrade VM size) or add a second VM behind a load balancer.
+
+### Why Native Session Auth over Firebase Auth?
+- **No vendor lock-in**: Full control over auth logic, user data, and session management.
+- **Server-side sessions**: More secure than JWTs — sessions can be instantly revoked (delete from DB).
+- **Simpler architecture**: No Firebase SDK dependency, no cross-service token validation.
+- **Co-located session store**: Sessions in PostgreSQL (connect-pg-simple) — zero additional cost, zero network latency.
+- **Trade-off**: No built-in OAuth/social login out of the box. Can add Passport.js strategies later if needed (Google, LinkedIn OAuth).
+
+### Why Netlify + API proxy over Firebase Hosting?
+- **Developer experience**: Auto-deploys on git push, instant preview deploys for PRs.
+- **Proxy simplicity**: `netlify.toml` redirects handle `/api/*` → GCP VM seamlessly — no CORS issues.
+- **Global CDN**: Netlify's edge network serves the SPA fast worldwide.
+- **Free tier**: Generous free tier (100GB bandwidth, 300 build minutes) — sufficient for most stages.
+- **Trade-off**: Proxy adds ~50-100ms latency per API call vs. direct connection. Acceptable for this use case.
+
 ### Why Gemini over OpenAI?
-- **GCP-native**: Lower latency, no cross-cloud egress.
+- **GCP-native**: Lower latency from the same cloud, no cross-cloud egress costs.
 - **Gemini 2.0 Flash**: Fast, cheap, excellent at structured extraction.
 - **Vertex AI integration**: Unified billing, IAM, monitoring.
 
-### Why Cloud Run over GKE?
-- **Serverless**: No cluster management.
-- **Scale-to-zero**: Workers idle when not processing.
-- **Cost-effective**: Pay only for actual compute time.
-- **Trade-off**: If we need persistent connections or complex scheduling, consider GKE.
+### Why BullMQ + Redis over Pub/Sub?
+- **Self-hosted**: Redis runs on the VM — no managed service cost.
+- **Rich job features**: Priority queues, delayed jobs, rate limiting, job progress tracking — all built in.
+- **Dashboard**: BullMQ Board provides a web UI for monitoring queue health.
+- **Node.js native**: First-class TypeScript support, runs in the same process model.
+- **Trade-off**: Not as durable as Pub/Sub. If Redis crashes, pending jobs are lost (mitigated by Redis persistence: AOF + RDB snapshots).
 
-### Why Pub/Sub pipeline over synchronous processing?
-- **Reliability**: Messages are durable; no data loss if a worker crashes.
-- **Scale**: Workers scale independently based on queue depth.
-- **Observability**: Each stage is independently monitored.
-- **Retry**: Built-in retry with dead-letter queues for failed messages.
+### Why pgvector over a dedicated vector DB (Pinecone/Weaviate)?
+- **Simplicity**: One database for structured data + vectors. No sync overhead.
+- **Cost**: No additional managed service cost. Runs on the same VM.
+- **Hybrid search**: Native SQL filters combined with vector search in one query.
+- **Scale**: pgvector with HNSW handles 1M vectors with <100ms query times.
+- **Trade-off**: If we exceed ~5M candidates, consider migrating to Vertex AI Vector Search 2.0.
