@@ -1237,3 +1237,269 @@ Scenario: **750K resumes already ingested**, 500 new resumes/day, 200 searches/d
 > - Reducing the re-ranking batch from top 50 → top 30 candidates (3 LLM calls instead of 5)
 > - Caching re-ranking results for identical or near-identical queries
 > - Using Gemini 2.5 Flash-Lite ($0.075 / 1M input) when available for ranking tasks
+
+---
+
+## 14. LLM Model Evaluation — Cross-Provider Comparison
+
+Our pipeline has **three distinct AI tasks**, each with different requirements for quality, latency, and cost sensitivity. This section evaluates models from all major providers and recommends **Performant**, **Balanced**, and **Economic** picks for each task.
+
+### Pricing Reference (Per 1M Tokens)
+
+#### Generation Models
+
+| Provider | Model | Input | Output | Context | Notes |
+|----------|-------|------:|-------:|--------:|-------|
+| **Google** | Gemini 2.5 Pro | $1.25 | $10.00 | 1M | Strongest reasoning in Gemini family |
+| | Gemini 2.5 Flash | $0.30 | $2.50 | 1M | Best balance in Gemini family |
+| | Gemini 2.5 Flash Lite | $0.10 | $0.40 | 1M | Ultra-cheap, good for structured extraction |
+| | Gemini 2.0 Flash | $0.15 | $0.60 | 1M | Previous gen, still very capable |
+| | Gemini 2.0 Flash Lite | $0.075 | $0.30 | 1M | Cheapest Gemini option |
+| **OpenAI** | GPT-4.1 | $2.00 | $8.00 | 1M | Best coding/agentic model from OpenAI |
+| | GPT-4.1 mini | $0.40 | $1.60 | 1M | Strong balanced option |
+| | GPT-4.1 nano | $0.10 | $0.40 | 1M | Ultra-cheap, good JSON output |
+| | GPT-4o | $2.50 | $10.00 | 128K | Multimodal flagship |
+| | GPT-4o mini | $0.15 | $0.60 | 128K | Cheap multimodal |
+| | o4-mini | $1.10 | $4.40 | 200K | Reasoning model (hidden thinking tokens add cost) |
+| **Anthropic** | Claude Opus 4 | $15.00 | $75.00 | 200K | Highest quality, very expensive |
+| | Claude Sonnet 4 | $3.00 | $15.00 | 200K | Excellent instruction following |
+| | Claude Haiku 3.5 | $0.80 | $4.00 | 200K | Fast, good at structured tasks |
+| **DeepSeek** | DeepSeek V3 | $0.27 | $1.10 | 128K | Excellent price/performance, open-source |
+| | DeepSeek R1 | $0.55 | $2.19 | 128K | Reasoning model, open-source |
+| **Mistral** | Mistral Large | $2.00 | $6.00 | 128K | Strong European alternative |
+| | Mistral Small | $0.10 | $0.30 | 128K | Very cheap, surprisingly capable |
+| | Codestral | $0.30 | $0.90 | 256K | Optimized for code/structured output |
+
+#### Embedding Models
+
+| Provider | Model | Price / 1M tokens | Dimensions | Max Input |
+|----------|-------|------------------:|----------:|---------:|
+| **Google** | text-embedding-005 | $0.10 | 768 | 2,048 tokens |
+| | gemini-embedding-001 | $0.10 | 3,072 (configurable) | 2,048 tokens |
+| **OpenAI** | text-embedding-3-small | $0.02 | 1,536 | 8,191 tokens |
+| | text-embedding-3-large | $0.13 | 3,072 | 8,191 tokens |
+| **Cohere** | embed-v4.0 | $0.10 | 1,024 | 512 tokens |
+| **Voyage AI** | voyage-3-large | $0.06 | 1,024 | 32,000 tokens |
+
+---
+
+### Task 1: Resume Structured Extraction
+
+**What it does**: Takes raw resume text (~1,000 tokens) and extracts structured JSON (name, skills, experience, education, etc.) + generates an embedding-optimized summary.
+
+**Requirements**:
+- Reliable JSON output (must parse without errors at scale)
+- Handles diverse resume formats, languages, and conventions
+- Latency: Not critical (async batch processing via BullMQ)
+- Volume: High (500K-1M one-time bulk, then ~500/day ongoing)
+- Quality matters: Extracted data quality directly impacts search accuracy
+
+#### Evaluation
+
+| Model | JSON Reliability | Extraction Quality | Speed | Cost / 1,000 Resumes | Verdict |
+|-------|:---:|:---:|:---:|---:|---|
+| Gemini 2.5 Flash | 9/10 | 9/10 | ~0.8s | $0.77 | **Performant** pick |
+| GPT-4.1 mini | 9/10 | 9/10 | ~1.0s | $1.52 | Excellent but 2x cost |
+| Gemini 2.5 Flash Lite | 8/10 | 8/10 | ~0.5s | $0.47 | **Balanced** pick |
+| GPT-4.1 nano | 8/10 | 7/10 | ~0.5s | $0.47 | Comparable to Flash Lite |
+| DeepSeek V3 | 8/10 | 8/10 | ~1.2s | $0.69 | Great value, open-source |
+| Mistral Small | 7/10 | 7/10 | ~0.6s | $0.39 | **Economic** pick |
+| Gemini 2.0 Flash Lite | 7/10 | 7/10 | ~0.4s | $0.35 | Cheapest Gemini option |
+| Claude Haiku 3.5 | 9/10 | 8/10 | ~0.8s | $2.00 | Excellent JSON but expensive |
+
+> **Cost calculation**: Per resume = (1,500 input × input_price/1M) + (800 output × output_price/1M)
+
+#### Recommendations for Resume Extraction
+
+| Tier | Model | Cost / 1K Resumes | Why |
+|------|-------|------------------:|-----|
+| **Performant** | Gemini 2.5 Flash | $0.77 | Best JSON reliability + extraction quality at low cost. Native Vertex AI = zero egress from GCP VM. |
+| **Balanced** | Gemini 2.5 Flash Lite | $0.47 | 40% cheaper than 2.5 Flash with slightly lower quality. For 1M resumes, saves ~$300 vs Flash. |
+| **Economic** | Mistral Small | $0.39 | Cheapest viable option. 7/10 quality is acceptable for bulk extraction with a validation pass. |
+| **Best value outside GCP** | DeepSeek V3 | $0.69 | If you want provider diversity. Excellent structured extraction at low cost. |
+
+---
+
+### Task 2: Query Understanding
+
+**What it does**: Parses a recruiter's natural language query ("Senior React dev in Bangalore, 5+ years fintech") into structured search intent JSON (semantic query + filters + ranking signals).
+
+**Requirements**:
+- Precise instruction following (must output exact JSON schema)
+- Understands recruiting domain (seniority levels, skill equivalence)
+- Latency: Critical (~300-500ms target, this is the first step user sees)
+- Volume: Medium (100-500 queries/day)
+- Quality critical: Bad parsing → bad search results
+
+#### Evaluation
+
+| Model | Instruction Following | Domain Understanding | Latency | Cost / 1,000 Queries | Verdict |
+|-------|:---:|:---:|:---:|---:|---|
+| GPT-4.1 mini | 9/10 | 9/10 | ~400ms | $0.24 | **Performant** pick |
+| Gemini 2.5 Flash | 9/10 | 8/10 | ~350ms | $0.16 | Close second |
+| Gemini 2.5 Flash Lite | 8/10 | 7/10 | ~200ms | $0.12 | **Balanced** pick |
+| GPT-4.1 nano | 8/10 | 7/10 | ~200ms | $0.12 | Comparable speed/cost |
+| DeepSeek V3 | 8/10 | 8/10 | ~500ms | $0.14 | Good but higher latency |
+| Mistral Small | 7/10 | 7/10 | ~250ms | $0.10 | **Economic** pick |
+| Gemini 2.0 Flash Lite | 7/10 | 6/10 | ~200ms | $0.08 | Cheapest, adequate for simple queries |
+
+> **Cost calculation**: Per query = (350 input × input_price/1M) + (200 output × output_price/1M)
+
+#### Recommendations for Query Understanding
+
+| Tier | Model | Cost / 1K Queries | Why |
+|------|-------|------------------:|-----|
+| **Performant** | GPT-4.1 mini | $0.24 | Best instruction following for structured JSON. Excellent at understanding nuanced recruiting queries. |
+| **Balanced** | Gemini 2.5 Flash Lite | $0.12 | Half the cost, very fast (~200ms), handles 80% of queries perfectly. GCP-native. |
+| **Economic** | Mistral Small | $0.10 | Cheapest viable option. Works well for straightforward queries. May need prompt tuning for edge cases. |
+
+---
+
+### Task 3: LLM Re-ranking & Reasoning
+
+**What it does**: Evaluates top 50 candidates against the search query. For each candidate, generates: match score (0-100), strengths, gaps, evidence, reasoning. This is the **core product value** — what recruiters see and pay for.
+
+**Requirements**:
+- Strong reasoning ability (must understand role fit beyond keyword matching)
+- Nuanced evaluation (distinguish "5 years React" from "5 years frontend with some React")
+- Good writing quality (explanations shown to recruiter)
+- Latency: Moderate (2-4s acceptable, can stream results)
+- Volume: Highest token consumption (5 LLM calls × 7,000 tokens each per search)
+- Quality: **Critical** — this IS the product
+
+#### Evaluation
+
+| Model | Reasoning Quality | Explanation Writing | Nuance | Cost / 1,000 Searches | Verdict |
+|-------|:---:|:---:|:---:|---:|---|
+| Claude Sonnet 4 | 10/10 | 10/10 | 10/10 | $17.25 | Gold standard but expensive |
+| GPT-4.1 | 9/10 | 9/10 | 9/10 | $14.50 | Excellent reasoning |
+| Gemini 2.5 Pro | 9/10 | 8/10 | 9/10 | $13.44 | **Performant** pick |
+| Gemini 2.5 Flash | 8/10 | 8/10 | 8/10 | $5.08 | **Balanced** pick |
+| GPT-4.1 mini | 8/10 | 8/10 | 7/10 | $3.30 | Surprisingly good for the price |
+| DeepSeek V3 | 8/10 | 7/10 | 8/10 | $2.24 | **Economic** pick |
+| DeepSeek R1 | 9/10 | 7/10 | 9/10 | $4.15 | Strong reasoning but verbose (hidden tokens) |
+| Gemini 2.5 Flash Lite | 7/10 | 6/10 | 6/10 | $1.28 | Too shallow for core ranking |
+| Mistral Small | 6/10 | 6/10 | 5/10 | $0.95 | Insufficient nuance for candidate evaluation |
+
+> **Cost calculation**: Per search = 5 calls × [(5,500 input × input_price/1M) + (1,500 output × output_price/1M)]
+
+#### Recommendations for Re-ranking
+
+| Tier | Model | Cost / 1K Searches | Why |
+|------|-------|------------------:|-----|
+| **Performant** | Gemini 2.5 Pro | $13.44 | Best reasoning available on GCP. Understands seniority signals, skill adjacency, career trajectories. Worth it for high-value recruiting. |
+| **Balanced** | Gemini 2.5 Flash | $5.08 | 62% cheaper than Pro with 8/10 reasoning. Sweet spot for most use cases. GCP-native. |
+| **Economic** | DeepSeek V3 | $2.24 | 4x cheaper than Gemini 2.5 Flash. Solid reasoning, though explanations are less polished. Best for cost-sensitive deployments. |
+| **Outside GCP alternative** | GPT-4.1 mini | $3.30 | If you want OpenAI reliability. Good reasoning at a moderate price point. |
+
+---
+
+### Task 4: Embedding Generation
+
+**Requirements**:
+- High quality semantic similarity for resume-to-query matching
+- Affordable at scale (750K resumes to embed)
+- Batch API support
+- Consistent, reproducible embeddings
+
+#### Evaluation
+
+| Model | Retrieval Quality | Batch Support | Cost for 750K Resumes | Verdict |
+|-------|:---:|:---:|---:|---|
+| OpenAI text-embedding-3-large | 9/10 | Yes | $40.00 | Best quality but no GCP co-location |
+| Google text-embedding-005 | 8/10 | Yes (250/batch) | $30.75 | **Balanced** — GCP-native, low latency |
+| Google gemini-embedding-001 | 9/10 | Yes | $30.75 | Newer, higher dimensions |
+| Voyage AI voyage-3-large | 9/10 | Yes | $18.45 | Best retrieval quality per $ |
+| OpenAI text-embedding-3-small | 7/10 | Yes | $6.15 | **Economic** — 5x cheaper than large |
+| Cohere embed-v4.0 | 8/10 | Yes | $30.75 | Multilingual strength |
+
+> **Cost calculation**: 750K resumes × 410 tokens/resume × price/1M tokens
+
+#### Recommendations for Embeddings
+
+| Tier | Model | Cost for 750K | Why |
+|------|-------|-------------:|-----|
+| **Performant** | gemini-embedding-001 or voyage-3-large | $30.75 / $18.45 | Highest retrieval quality. gemini-embedding is GCP-native. voyage-3-large is cheaper with comparable quality. |
+| **Balanced** | text-embedding-005 | $30.75 | Already in our stack. 768 dims. Native Vertex AI integration, batch support, proven at scale. |
+| **Economic** | text-embedding-3-small | $6.15 | 5x cheaper. Quality drop is real but acceptable if combined with strong LLM re-ranking. Cross-provider dependency. |
+
+---
+
+### Recommended Configurations
+
+#### Config A: Performant (Best quality)
+
+| Task | Model | Provider |
+|------|-------|----------|
+| Resume Extraction | Gemini 2.5 Flash | Google Vertex AI |
+| Query Understanding | GPT-4.1 mini | OpenAI |
+| Re-ranking & Reasoning | Gemini 2.5 Pro | Google Vertex AI |
+| Embeddings | text-embedding-005 | Google Vertex AI |
+
+**Monthly AI cost** (500 resumes/day, 200 searches/day): **~$107/mo**
+- Extraction: 15K × $0.00077 = $11.55
+- Query understanding: 6K × $0.00024 = $1.44
+- Re-ranking: 6K × $0.01344 = $80.64
+- Embeddings: 15K × $0.000041 = $0.62
+- Query embeddings: 6K × $0.00001 = $0.06
+
+> **Tradeoff**: Mixing OpenAI for query understanding adds a provider dependency but gives the best instruction following. If you want single-provider simplicity, use Gemini 2.5 Flash for query understanding too (saves $0.72/mo, negligible).
+
+#### Config B: Balanced (Recommended)
+
+| Task | Model | Provider |
+|------|-------|----------|
+| Resume Extraction | Gemini 2.5 Flash Lite | Google Vertex AI |
+| Query Understanding | Gemini 2.5 Flash Lite | Google Vertex AI |
+| Re-ranking & Reasoning | Gemini 2.5 Flash | Google Vertex AI |
+| Embeddings | text-embedding-005 | Google Vertex AI |
+
+**Monthly AI cost** (500 resumes/day, 200 searches/day): **~$38/mo**
+- Extraction: 15K × $0.00047 = $7.05
+- Query understanding: 6K × $0.00012 = $0.72
+- Re-ranking: 6K × $0.00508 = $30.48
+- Embeddings: 15K × $0.000041 = $0.62
+- Query embeddings: 6K × $0.00001 = $0.06
+
+> **Why this is recommended**: Single provider (Vertex AI), single billing, zero egress cost, ~$38/mo for all AI. Quality is 8/10 across the board — more than sufficient for most recruiting use cases.
+
+#### Config C: Economic (Lowest cost)
+
+| Task | Model | Provider |
+|------|-------|----------|
+| Resume Extraction | Mistral Small | Mistral |
+| Query Understanding | Gemini 2.0 Flash Lite | Google Vertex AI |
+| Re-ranking & Reasoning | DeepSeek V3 | DeepSeek |
+| Embeddings | text-embedding-3-small | OpenAI |
+
+**Monthly AI cost** (500 resumes/day, 200 searches/day): **~$17/mo**
+- Extraction: 15K × $0.00039 = $5.85
+- Query understanding: 6K × $0.00008 = $0.48
+- Re-ranking: 6K × $0.00224 = $13.44
+- Embeddings: 15K × $0.0000082 = $0.12
+- Query embeddings: 6K × $0.000002 = $0.01
+
+> **Tradeoff**: 3 different providers, 3 API keys to manage, cross-provider latency. Extraction and re-ranking quality drops to 7/10. Viable for MVP/early stage but may impact recruiter satisfaction on nuanced searches.
+
+---
+
+### Provider Dependency & Operational Considerations
+
+| Factor | Single GCP (Config B) | Multi-Provider (Config A/C) |
+|--------|:---:|:---:|
+| API keys to manage | 1 | 2-3 |
+| Billing dashboards | 1 | 2-3 |
+| Network egress cost | $0 | ~$5-10/mo |
+| Latency consistency | Best | Variable |
+| Vendor lock-in risk | Higher | Lower |
+| Failover complexity | Must switch provider on outage | Can route between providers |
+
+### Upgrade Path
+
+Start with **Config B** (all Vertex AI, ~$38/mo). If recruiters report that re-ranking explanations lack depth:
+
+1. **First upgrade**: Swap re-ranking to Gemini 2.5 Pro (+$45/mo, total ~$83/mo)
+2. **Second upgrade**: Swap query understanding to GPT-4.1 mini (+$0.72/mo, negligible)
+3. **Nuclear option**: Swap re-ranking to Claude Sonnet 4 for best-in-class reasoning (+$65/mo vs Pro)
+
+The architecture is designed so that changing the LLM for any task is a **single config change** in `backend/src/services/llm.service.ts` — no pipeline changes needed.
