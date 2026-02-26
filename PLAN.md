@@ -128,30 +128,71 @@ Recruiter uploads PDF/DOCX
 - **Deduplication**: Hash-based check (SHA-256 of file content) to avoid re-processing
 - **File naming**: `resumes/{org_id}/{candidate_id}/{original_filename}`
 
-### Stage 2: Text Extraction
+### Stage 2: Text & Structure Extraction (Python Microservice — Docling)
+
+Extraction quality is the **foundation** of the entire pipeline — if extraction is poor, downstream LLM parsing and vector search will be unreliable. After evaluating multiple libraries across Python and Node.js, we chose **Docling** (IBM) as a dedicated Python FastAPI microservice.
+
+#### Extraction Library Comparison
+
+| Feature | **Docling (IBM)** | pdf-parse (Node.js) | PyMuPDF4LLM | Unstructured | officeparser (Node.js) |
+|---|---|---|---|---|---|
+| **Layout Analysis** | AI-powered (DocLayNet model) | None | Limited | Semantic partitioning | None |
+| **Table Extraction** | TableFormer model (high accuracy) | None | Basic | Supported | Basic |
+| **OCR (scanned PDFs)** | Built-in (Tesseract/EasyOCR/RapidOCR) | None | None | Built-in | None |
+| **Reading Order** | AI-detected natural reading order | Linear stream | Page order | Semantic chunks | Paragraph order |
+| **Multi-format** | PDF, DOCX, PPTX, XLSX, HTML, images | PDF only | PDF only | Multi-format | DOCX only |
+| **Structure Preservation** | Headings, sections, lists, tables, figures | Flat text dump | Markdown sections | Element types | Paragraphs only |
+| **Export Formats** | Markdown, HTML, JSON, DocTags | Plain text | Markdown | JSON elements | Plain text |
+| **Speed** | Fast (Heron layout model) | Very fast | Fastest (~0.12s) | Moderate (~1.3s) | Fast |
+| **RAG Suitability** | Excellent — structured + semantic | Poor — flat text | Good — markdown | Good — chunks | Poor — flat text |
+| **Resume Handling** | Sections identified (education, experience, skills) | All text concatenated | Basic sections | Element-based | Paragraphs only |
+| **Community** | 18K+ GitHub stars, IBM-backed, Linux Foundation | 3K stars | Part of PyMuPDF | 10K+ stars | 200 stars |
+
+#### Why Docling Wins for Resume Extraction
+
+1. **Layout understanding**: Resumes have complex layouts — multi-column, tables for skills, sidebar sections, headers/footers. Docling's DocLayNet model identifies titles, headings, paragraphs, tables, and figures as distinct elements, preserving the document's logical structure.
+
+2. **Table reconstruction**: Skills grids, experience tables, and education sections are common in resumes. Docling's TableFormer model reconstructs table structure accurately, unlike pdf-parse which loses all table formatting.
+
+3. **OCR for scanned resumes**: Many candidates upload scanned PDFs or image-based resumes. Docling has built-in OCR support, while Node.js libraries require external OCR services.
+
+4. **Structured output for LLM**: Docling exports to **Markdown with headings and sections preserved**, which dramatically improves LLM extraction accuracy. Instead of feeding Gemini a flat text dump, we feed it well-structured markdown where "Work Experience", "Education", and "Skills" are clearly delineated.
+
+5. **Multi-format native**: Handles PDF, DOCX, PPTX, and images natively — no need for separate libraries per format.
+
+#### Architecture: Python Extraction Microservice
 
 ```
-BullMQ triggers Parse Worker (on VM)
+Node.js Backend (BullMQ Worker)
         │
+        │ HTTP POST /extract
+        │ (sends file buffer)
         ▼
-┌─────────────────────────────────┐
-│  Text Extraction Worker         │
-│                                  │
-│  PDF  → pdf-parse / pdf2json    │
-│  DOCX → officeparser v6 (AST)  │
-│  DOC  → libreoffice → PDF →    │
-│          pdf-parse              │
-└────────────┬────────────────────┘
-             │
-             ▼
-      Raw text + basic
-      structure preserved
+┌─────────────────────────────────────────┐
+│  Python FastAPI Microservice            │
+│  (runs on same VM, port 8100)           │
+│                                          │
+│  ┌────────────────────────────────────┐ │
+│  │  Docling DocumentConverter         │ │
+│  │                                    │ │
+│  │  1. Layout analysis (DocLayNet)    │ │
+│  │  2. Table extraction (TableFormer) │ │
+│  │  3. OCR if needed (EasyOCR)        │ │
+│  │  4. Reading order detection        │ │
+│  │  5. Export to Markdown + JSON      │ │
+│  └────────────────────────────────────┘ │
+│                                          │
+│  Returns:                                │
+│  {                                       │
+│    "markdown": "# John Doe\n## ...",    │
+│    "sections": [...],                    │
+│    "tables": [...],                      │
+│    "metadata": { "pages": 2 }           │
+│  }                                       │
+└─────────────────────────────────────────┘
 ```
 
-**Libraries:**
-- `pdf-parse` for PDF text extraction
-- `officeparser` v6 for DOCX (produces AST with paragraphs, headings, tables)
-- Fallback: GCP Document AI for scanned/image-heavy PDFs (OCR)
+The Node.js parse worker sends the resume file to the Python microservice via HTTP, receives structured markdown + metadata, then passes it to the Gemini LLM extraction stage. This gives the LLM **much better input** than raw text — sections are labeled, tables are formatted, and reading order is correct.
 
 ### Stage 3: LLM-Based Structured Extraction
 

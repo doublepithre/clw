@@ -1,0 +1,9 @@
+# ResumeAI Extraction Service
+# Python FastAPI microservice powered by Docling (IBM) for high-quality document extraction
+
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.32.0,<1.0.0
+python-multipart>=0.0.18
+docling>=2.74.0
+easyocr>=1.7.0
+pydantic>=2.0.0

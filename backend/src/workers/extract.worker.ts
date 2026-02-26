@@ -4,17 +4,44 @@ import { extractResumeData } from '../services/llm.service.js';
 import { updateCandidateData, storeCandidateSkills } from '../services/candidate.service.js';
 import { embedQueue } from './queues.js';
 
+interface SectionMeta {
+  heading: string;
+  level: number;
+}
+
+interface ExtractionMeta {
+  pages: number;
+  fileType: string;
+  hasTables: boolean;
+  extractionTimeMs: number;
+  ocrUsed: boolean;
+}
+
 interface ExtractJobData {
   candidateId: string;
+  /** Structured markdown from Docling (with headings, sections, tables) */
   rawText: string;
+  /** Section metadata detected by Docling */
+  sections?: SectionMeta[];
+  /** Number of tables detected */
+  tables?: number;
+  /** Extraction metadata */
+  metadata?: ExtractionMeta;
 }
 
 async function processExtractJob(job: Job<ExtractJobData>) {
-  const { candidateId, rawText } = job.data;
+  const { candidateId, rawText, sections, metadata } = job.data;
 
-  console.log(`[Extract Worker] Processing candidate ${candidateId}`);
+  console.log(
+    `[Extract Worker] Processing candidate ${candidateId} ` +
+    `(${sections?.length ?? 0} sections, ${metadata?.pages ?? '?'} pages, ` +
+    `format: ${metadata?.fileType ?? 'unknown'})`
+  );
 
   // Call Gemini for structured extraction
+  // The rawText here is structured markdown from Docling, not flat text.
+  // This means Gemini sees clear section headings like "## Work Experience",
+  // formatted tables, and proper reading order — dramatically improving accuracy.
   const extracted = await extractResumeData(rawText);
 
   // Update candidate with extracted data
@@ -59,7 +86,7 @@ async function processExtractJob(job: Job<ExtractJobData>) {
       .slice(0, 5) || [],
   });
 
-  console.log(`[Extract Worker] Extraction complete for ${candidateId}`);
+  console.log(`[Extract Worker] LLM extraction complete for ${candidateId}`);
 }
 
 export function createExtractWorker() {

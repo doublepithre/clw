@@ -29,5 +29,23 @@ module.exports = {
       merge_logs: true,
       time: true,
     },
+    {
+      name: 'resumeai-extraction',
+      script: '../extraction-service/main.py',
+      interpreter: 'python3',
+      interpreter_args: '-m uvicorn main:app --host 0.0.0.0 --port 8100',
+      cwd: '../extraction-service',
+      instances: 1,
+      exec_mode: 'fork',
+      env: {
+        EXTRACTION_PORT: '8100',
+        ENABLE_OCR: 'true',
+      },
+      max_memory_restart: '2G',
+      error_file: 'logs/extraction-error.log',
+      out_file: 'logs/extraction-out.log',
+      merge_logs: true,
+      time: true,
+    },
   ],
 };

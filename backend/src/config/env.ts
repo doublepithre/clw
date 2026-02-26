@@ -18,6 +18,8 @@ const envSchema = z.object({
   GEMINI_MODEL: z.string().default('gemini-2.0-flash'),
   EMBEDDING_MODEL: z.string().default('text-embedding-005'),
 
+  EXTRACTION_SERVICE_URL: z.string().default('http://localhost:8100'),
+
   APP_URL: z.string().default('http://localhost:5173'),
   API_URL: z.string().default('http://localhost:3000'),
 });
