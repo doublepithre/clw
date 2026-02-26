@@ -1,0 +1,33 @@
+module.exports = {
+  apps: [
+    {
+      name: 'resumeai-api',
+      script: 'dist/server.js',
+      instances: 2,
+      exec_mode: 'cluster',
+      env: {
+        NODE_ENV: 'production',
+        PORT: 3000,
+      },
+      max_memory_restart: '512M',
+      error_file: 'logs/api-error.log',
+      out_file: 'logs/api-out.log',
+      merge_logs: true,
+      time: true,
+    },
+    {
+      name: 'resumeai-workers',
+      script: 'dist/workers/index.js',
+      instances: 1,
+      exec_mode: 'fork',
+      env: {
+        NODE_ENV: 'production',
+      },
+      max_memory_restart: '1G',
+      error_file: 'logs/workers-error.log',
+      out_file: 'logs/workers-out.log',
+      merge_logs: true,
+      time: true,
+    },
+  ],
+};
